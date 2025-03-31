@@ -22,6 +22,10 @@
 #define IO_EXPANDER_SDA 8
 #endif
 
+//I2C
+#define I2C_SCL 7
+#define I2C_SDA 15
+
 // Backlight
 #define TFT_BL P1
 
@@ -33,10 +37,8 @@
 // SD Card (in SPI mode)
 // The SD card's Chip Select is on the IO expander.
 #define SDCARD_CS P3
-
-
-
-
+#define SDCARD_MOSI 1
+#define SDCARD_MISO 4
 
 // Display.
 #define TFT_SCK 2

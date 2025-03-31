@@ -1,6 +1,8 @@
 /*
  * The first thing to do here is to initialise the expander, and set up the correct IO pins.
  * Make a small beep, enable the backlight, etc.
+ * This has to be a C++ file, because it requires a lot of different objects.
+
 */
 #include "Waveshare_ESP32_S3_Touch_LCD_4.h"
 #include <Arduino.h>
@@ -9,15 +11,17 @@
 // This is declared in the main code.
 extern TCA9554 expander;
 
+extern "C" void tca_expander_reset_dance(void);
+
 void tca_expander_reset_dance(void)
 {
-  Wire.begin();
+  Wire.begin(I2C_SDA, I2C_SCL, 100000); // Slow down I2C, because we will use long wires.
   expander.begin();
   // To test this, make a small beep.
   expander.pinMode1(BEEPER, OUTPUT);
   expander.write1(BEEPER, LOW);
   expander.write1(BEEPER, HIGH);
-  delay(100);
+  delay(20); // Make a short beep
   expander.write1(BEEPER, LOW);
 
   // Reset the display module
