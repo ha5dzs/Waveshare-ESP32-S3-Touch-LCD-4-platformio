@@ -53,7 +53,7 @@ There is some ambiguitiy with the display. The code says it's driven in 16-bit m
 | 18 | ESP32 IO 45 | B2 on schematic | `B1` |
 | 19 | ESP32 IO 48 | B3 on shematic | `B2` |
 | 20 | ESP32 IO 47 | B4 on schmeatic | `B3` |
-| 21 | ESP32 IO 21 | E5 on schematic | `B4` |
+| 21 | ESP32 IO 21 | B5 on schematic | `B4` |
 | 22 | ESP32 IO 14 | G0 on schematic | `G0` |
 | 23 | ESP32 IO 13 | G1 on schrmatic | `G1`|
 | 24 | ESP32 IO 12 | G2 on schematic | `G2` |
