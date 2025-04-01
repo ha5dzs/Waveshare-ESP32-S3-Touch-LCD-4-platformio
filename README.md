@@ -78,11 +78,124 @@ There is some ambiguitiy with the display. The code says it's driven in 16-bit m
 
 ### GT911 touch panel
 
-Wired to I²C, reset is on IO 0 in the TCA9554 IO expander, interrupt is wired to ESP32 IO 16.
+Wired to I²C, reset is on IO 0 in the TCA9554 IO expander, interrupt is wired to ESP32 IO 16. For now, I won't use it to attach interrupt, because LVGL regularly checks the input devices anyway. But, according to the datasheet, the interrupt pin is used in the reset procedure as per  [TAMC_GT911::reset()](https://github.com/TAMCTec/gt911-arduino/blob/main/TAMC_GT911.cpp), the inerrupt pin has to be driven low when the reset is pulled low, and depending on timing, the address of the chip can be selected. If within 5 milliseconds of the reset pin going high, the interrupt pin is pulled high too, then the controller will change to the alternative address, which it will keep until the next reset procedure.
 
+In this booard, achieving this can be a bit tricky, because the GT911 reset pin is though the IO expander `P0`, but the interrupt pin is wired up directly to the ESP32 IO 16. So for now, this is kept on default.
 
+For future reference, in case the alternate address is needed, the initialisation should be moved to `tca_expander_reset_dance()`, and timing should be verified with an oscilloscope.
 
+### The RTC situation PCF85063A RTC module and the internal RTC in the ESP32
 
+The ESP32 has an internal RTC, but has no backup battery. In an ideal world, where there is always network connectivity, one could set up a local time server and sync time during bootup. But the world is cruel. So, to compensate for this, Waveshare people added an external RTC, which is connected to the I²C bus, and perhaps more importantly, has the option to connect an external battery. So when the board is powered off, the time settings are preserved.
+
+During bootup, the code sets the ESP RTC to the PCF85036A RTC. And later-on, if there is a network connection, the local RTC gets synced using NTP, and the PCF85036A is set accordingly. Another caveat is that the [Soldered-PCF85063A-RTC-Module-Arduino-Library](https://github.com/SolderedElectronics/Soldered-PCF85063A-RTC-Module-Arduino-Library/tree/main) does not support time zones, but [ESP32Time](https://github.com/fbiego/ESP32Time) does.
+
+## SW6106 power management IC
+
+There is no dedicated Arduino library for this, but [someone asked this on StackExchange](https://arduino.stackexchange.com/questions/70420/reading-i2c-data-from-sw6106-register) and [someone else got a nice collection of datasheets and register descriptions](https://archive.org/details/sw-6106-schematic-release-sch-006-v-2.2) here. This chip supports power delivery and fast charging. It is also possible to set the interrupt pin according to a high number of conditions. As this board can be powered externally from the interface connector and has its own buck converter and I don't plan to use a battery at all, I think I'll leave this alone for now.
+
+## CAN bus
+
+The board has a CAN bus transceiver, and the `CANH` and `CANL` lines are wired to the interface connector. Through the IO multiplexer in the ESP32, it is possible to receive and transmit CAN frames using its internal dedicated hardware. For some reason, they don't call it CAN (Control Area Network), but they call it [TWAI (Two-Wire Automotive Interface)](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/peripherals/twai.html). Due to a large number of variants, its code is moved to a separate file.
+
+## Software
+
+## Environment setup
+
+`platformio.ini` is used to rename the environment and configure the external memory.
+
+```ini
+[env:Waveshare_ESP32_S3_Touch_LCD_4]
+platform = espressif32
+framework = arduino
+board = esp32-s3-devkitm-1
+; A couple of overrides.
+board_build.arduino.memory_type = qio_opi
+board_build.flash_mode = qio
+board_build.psram_type = opi
+board_upload.flash_size = 16MB
+board_upload.maximum_size = 16777216
+monitor_speed = 115200
+build_flags =
+    -DARDUINO_USB_MODE=1 ; Serial port please?
+    -DARDUINO_USB_CDC_ON_BOOT=1  ; We need CDC for the serial port stuff
+    -DBOARD_HAS_PSRAM
+    -DLV_CONF_INCLUDE_SIMPLE
+    -DLV_USE_DEMO_WIDGETS
+lib_deps =
+    https://github.com/moononournation/Arduino_GFX
+    lvgl/lvgl@^8.4.0
+    https://github.com/yasir-shahzad/SoftI2C.git
+    https://github.com/RobTillaart/TCA9554.git
+    https://github.com/tamctec/gt911-arduino
+    https://github.com/SolderedElectronics/Soldered-PCF85063A-RTC-Module-Arduino-Library.git
+    https://github.com/fbiego/ESP32Time.git
+```
+
+This board has the USB wired directly from the MCU, so `-DARDUINO_USB_MODE=1` and `-DARDUINO_USB_CDC_ON_BOOT=1` are used.
+
+**IMPORTANT things that make the board difficult to work with at first:**
+
+* The board comes with the LVGL widgets demo, which runs slowly
+    * USB CDC is not enabled, so one must to the `Reset` -> `Reset + Boot` -> `Boot` combo in order to upload new code
+* The SW6101 chip is somehow misconfigured
+    * It tries to request USB PD when plugged in a computer? At least something seems to touch VBUS
+    * When pressing `BAT_PWR`, it just flashes once when powered from a computer
+    * When plugged into a smart charger that supports USB PD, it doesn't do anything
+    * The board only starts when:
+        * The USB cable is plugged to a simple 5V charger
+        * External power supply via the interface connector
+
+When using the external power supply, I noticed that I got rapid connection and disconnection sounds from my computer when plugging in. This is because the GND on the interface connector and the outer shield of the USB-C connector are galvanically connected to the GND of the USB line. While this is not 'wrong' per se, the USB connection fails due to a ground loop from my external power supply and the computer. To upload the first version of this code, I had to use the external power supply, and connect the USB to a battery-powered computer.
+
+Afterwards, the power consumption is low enough to be powered from the USB port, and since the SW6106 device is not configured, it no longer interferes with the USB poweer.
+
+BUT: as long as `-DARDUINO_USB_MODE=1` and `-DARDUINO_USB_CDC_ON_BOOT=1` are enabled, it seems that it won't boot until valid USB connection is established to a host computer. So when using this in an external project, when going into production, these two flags should be cleared.
+
+### Low-level display access
+
+The St7701 display is configured via sotware SPI, and then instructed to work in 16-bit parallel load RGB.
+
+```C
+// Software SPI to configure the display.
+Arduino_DataBus *sw_spi_bus = new Arduino_SWSPI(GFX_NOT_DEFINED /* DC pin */, TFT_CS /* TFT Chip Select */, TFT_SCK /* SPI clock */, TFT_SDA /* MOSI */, GFX_NOT_DEFINED /* MISO */);
+
+// Display hardware definition
+Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
+  TFT_DE /* Data Enable */, TFT_VS /* Vertical sync */, TFT_HS /* Horizontal sync */, TFT_PCLK /* Pixel clock */,
+  TFT_R0, TFT_R1, TFT_R2, TFT_R3, TFT_R4 /* Red channel*/,
+  TFT_G0, TFT_G1, TFT_G2, TFT_G3, TFT_G4, TFT_G5 /* Green channel*/,
+  TFT_B0, TFT_B1, TFT_B2, TFT_B3, TFT_B4 /* Blue channel*/,
+  TFT_HSYNC_POLARITY, TFT_HSYNC_FRONT_PORCH, TFT_HSYNC_PULSE_WIDTH, TFT_HSYNC_BACK_PORCH /* Horizontal sync settings, times are in ns, apparently */,
+  TFT_VSYNC_POLARITY, TFT_VSYNC_FRONT_PORCH, TFT_VSYNC_PULSE_WIDTH, TFT_VSYNC_BACK_PORCH /* Vertical sync settings, similar to above */,
+  TFT_PCLK_ACTIVE_NEG /* Falling edge? Active low? */, TFT_DATA_SPEED, TFT_USE_BIG_ENDIAN
+);
+
+// Low-level display object
+Arduino_RGB_Display *tft = new Arduino_RGB_Display(
+  TFT_WIDTH, TFT_HEIGHT, rgbpanel, ROTATION, TFT_AUTO_FLUSH /* Auto flush is false, because it is done from lvgl.*/,
+  sw_spi_bus, GFX_NOT_DEFINED /* Resetting the panel is done during the reset dance */,
+  st7701_type1_init_operations, sizeof(st7701_type1_init_operations)
+);
+```
+
+To check successful initialisation, a test pattern is displayed using the following code in `setup()`:
+
+```C
+for (uint16_t x_coord = 0; x_coord < TFT_WIDTH; x_coord++)
+  {
+    for (uint16_t y_coord = 0; y_coord < TFT_HEIGHT; y_coord++)
+    {
+      // X, Y, colour. In this case, 16 bits.
+      tft -> writePixel(x_coord, y_coord, tft->color565( x_coord<<1, (x_coord + y_coord)<<2, y_coord<<1));
+    }
+  }
+  tft->flush();
+```
+
+### LVGL
+
+LVGL 8.4 is used here, becuase I found a possible bug [in another project that use the same display](https://github.com/ha5dzs/Guition-ESP32-4848S040-platformio).
 
 
 

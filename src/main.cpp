@@ -4,9 +4,15 @@
 #include <TCA9554.h>
 #include <Arduino_GFX_Library.h>
 #include <TAMC_GT911.h>
-#include "HWCDC.h"
+#include <PCF85063A-SOLDERED.h> // RTC on board, with a battery backup
+#include <ESP32time.h> // Internal RTC on the ESP32, no backup battery
+#include <driver/twai.h>
+#include "can_bus_twai.h"
+#include <lvgl.h>
+#include <Ticker.h>
+#include "keyboard_example_scene.h"
 
-HWCDC USBSerial;
+#define TICKER_MS 5
 
 // IO expander.
 #if defined V1
@@ -40,16 +46,91 @@ Arduino_RGB_Display *tft = new Arduino_RGB_Display(
   st7701_type1_init_operations, sizeof(st7701_type1_init_operations)
 );
 
-// Touch panel
-TAMC_GT911 touch_panel(I2C_SDA, I2C_SCL, -1 /*Touch panel ionterrupt*/, -1 /* Reset pin, do it separately*/, TFT_WIDTH, TFT_HEIGHT );
+// Touch panel. For now, the interrupt pin is ignored in the code, but it is used for hardware initialisation.
+TAMC_GT911 touch_panel(I2C_SDA, I2C_SCL, TP_INT /*Touch panel ionterrupt*/, -1 /* Reset pin, do it separately*/, TFT_WIDTH, TFT_HEIGHT );
+
+// Ticker, for LVGL.
+Ticker ticker;
+
+// Real-time clock.
+PCF85063A external_rtc;
+ESP32Time internal_rtc(0); // No timezone defined. specify offset in seconds here in required.
+
+// Can-bus stuff. Look at can_bus_twai.*
+twai_message_t can_bus_message_to_send;
+twai_message_t can_bus_message_received;
+
+/*
+ * LVGL-specific stuff
+*/
+
+// Main pointers
+static lv_disp_draw_buf_t draw_buffer;
+static lv_color_t *frame_buffer;
+static lv_disp_drv_t display_driver;
+
+// Display updater function
+void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p)
+{
+    uint32_t w = (area->x2 - area->x1 + 1);
+    uint32_t h = (area->y2 - area->y1 + 1);
+
+    tft->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t *)&color_p->full, w, h);
+    tft->flush(); // Do the actual flushing
+
+    lv_disp_flush_ready(disp);
+}
+
+//This function is executed every LVGL_TICKER_MS milliseconds.
+void ticker_call_function(void)
+{
+  // Since the serial port here doesn't work, I blink the backlight.
+  //digitalWrite(TFT_BL, !digitalRead(TFT_BL)); // Oldest trick in the book.
+  lv_tick_inc(TICKER_MS);
+  lv_task_handler();
+}
 
 
+// Touch panel callback function. LVGL 8.4.0 does not support multitouch.
+void my_input_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data)
+{
+  touch_panel.read();
+  {
+    if (touch_panel.isTouched)
+    {
+      data->state = LV_INDEV_STATE_PRESSED;
+      // Since no multitouch, get the first point.
+      data->point.x = touch_panel.points[0].x;
+      data->point.y = touch_panel.points[0].y;
+    }
+    else
+    {
+      data->state = LV_INDEV_STATE_RELEASED;
+    }
+  }
+}
 
 void setup()
 {
+  Serial.begin(115200); // Initialise the UART.
+
   // Start up the I2C hardware and reset peripherals using the IO expander.
   tca_expander_reset_dance();
 
+  // Ticker
+  ticker.attach_ms(TICKER_MS, ticker_call_function);
+
+  // External Real-time clock
+  external_rtc.begin(); // This is in local time
+  if(external_rtc.getYear() < 2025)
+  {
+    // If we got here, we lost time, so for now, put a dummy time on.
+    external_rtc.setTime(13, 55, 00); // 24H mode, ex. 6:54:00
+    external_rtc.setDate(2, 1, 4, 2025); // 0 for Sunday, ex. Saturday, 16.5.2020.
+
+  }
+  // During bootup, set the internal RTC to the external RTC. Note how the arguments are backwards
+  internal_rtc.setTime(external_rtc.getSecond(), external_rtc.getMinute(), external_rtc.getHour(), external_rtc.getDay(), external_rtc.getMonth(), external_rtc.getYear());
 
 
   // Display hardware
@@ -67,27 +148,80 @@ void setup()
   tft->flush();
 
   // Touch panel
-  pinMode(TP_INT, INPUT);
+  touch_panel.reset(); // This toggles the interrupt pin as per the datasheet
   touch_panel.begin();
+  touch_panel.setRotation(TAMC_GT911_ROTATION);
   touch_panel.setResolution(TFT_WIDTH, TFT_HEIGHT);
+
+  // LVGL
+  lv_init(); // Start the dance
+
+  // Initialise an entire frame's buffer in the SPI RAM
+  frame_buffer = (lv_color_t *)heap_caps_malloc(sizeof(lv_color_t) * TFT_WIDTH * TFT_HEIGHT, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+  // If the PSRAM is not initialised, this should fail. 480x480x2=460800 -> 450 kB
+  if(frame_buffer == NULL)
+  {
+    Serial.println("Unable to allocate memory for the frame buffer. Do you have enough PSRAM?\n");
+    while(1);
+  }
+
+  // Initialise draw buffer, and assign it to the frame buffer.
+  lv_disp_draw_buf_init(&draw_buffer, frame_buffer, NULL, TFT_WIDTH * TFT_HEIGHT);
+
+  // Initialise the display driver, and set some basic details.
+  lv_disp_drv_init(&display_driver);
+  display_driver.hor_res = TFT_WIDTH;
+  display_driver.ver_res = TFT_HEIGHT;
+  display_driver.flush_cb = my_disp_flush; // Assign callback for display update
+  display_driver.full_refresh = 0; // Always redraw the entire screen. This makes it slower
+  display_driver.draw_buf = &draw_buffer; // The memory address where the draw buffer begins
+
+  // Finally, register this display
+  lv_disp_drv_register(&display_driver);
+
+
+  // Initialise the touch panel driver
+  static lv_indev_drv_t indev_drv;
+  lv_indev_drv_init(&indev_drv);
+  indev_drv.type = LV_INDEV_TYPE_POINTER; // No multitouch :()
+  indev_drv.read_cb = my_input_read; // This is where we read the touch controller
+  lv_indev_drv_register(&indev_drv);
+
+
+  // Print something
+  lv_obj_t *label = lv_label_create( lv_scr_act() );
+  lv_label_set_text( label, "LVGL V" GFX_STR(LVGL_VERSION_MAJOR) "." GFX_STR(LVGL_VERSION_MINOR) "." GFX_STR(LVGL_VERSION_PATCH));
+  lv_obj_align( label, LV_ALIGN_CENTER, 0, -20 );
+
+
+
+  // Call the keyboard sample scene
+  lv_example_keyboard_1();
 
 
   // Print out the amount of memory available, see if the PSRAM is visible
-  Serial.begin(115200);
   Serial.printf("Available PSRAM: %d KB\n", heap_caps_get_free_size(MALLOC_CAP_SPIRAM)>>10);
+  // Verify operation
+  Serial.printf("PCF85063A RTC says it's %d/%d/%d %d:%d:%d\n", external_rtc.getYear(), external_rtc.getMonth(), external_rtc.getDay(), external_rtc.getHour(), external_rtc.getMinute(), external_rtc.getSecond());
+  Serial.print("Internal RTC says: ");
+  Serial.println(internal_rtc.getTime("%A, %B %d %Y %H:%M:%S"));
+  Serial.print("Current Unix time is: ");
+  Serial.println(internal_rtc.getEpoch());
 }
 
 void loop()
 {
+  /*
   touch_panel.read();
   if (touch_panel.isTouched){
     for (int i=0; i<touch_panel.touches; i++){
-      tft->setCursor(0, i*20);
-      tft->print("Touch ");tft->print(i+1);tft->print(": ");;
-      tft->print("  x: ");tft->print(touch_panel.points[i].x);
-      tft->print("  y: ");tft->print(touch_panel.points[i].y);
-      tft->print("  size: ");tft->println(touch_panel.points[i].size);
-
+      Serial.print("Touch ");Serial.print(i+1);Serial.print(": ");;
+      Serial.print("  x: ");Serial.print(touch_panel.points[i].x);
+      Serial.print("  y: ");Serial.print(touch_panel.points[i].y);
+      Serial.print("  size: ");Serial.println(touch_panel.points[i].size);
+      Serial.println(' ');
     }
   }
+  */
 }

@@ -25,14 +25,10 @@
 //I2C
 #define I2C_SCL 7
 #define I2C_SDA 15
+#define I2C_SPEED 50000 /* Keep the I2C slow, because we don't know how long the wiring will be.*/
 
 // Backlight
 #define TFT_BL P1
-
-// Touch panel
-#define TP_INT 16
-#define TP_RESET P0
-
 
 // SD Card (in SPI mode)
 // The SD card's Chip Select is on the IO expander.
@@ -93,6 +89,21 @@
 // Arduino GFX-specific stuff.
 #define TFT_AUTO_FLUSH false
 
+// Touch panel
+#define TP_INT 16
+#define TP_RESET P0
+
+// This is for use with the TAMC_GT911 library: make sure that the screen rotates together with the touch coordinates.
+#if defined(ROTATION) && ROTATION == 0
+#define TAMC_GT911_ROTATION 1
+#elif defined(ROTATION) && ROTATION == 1
+#define TAMC_GT911_ROTATION 2
+#elif defined(ROTATION) && ROTATION == 2
+#define TAMC_GT911_ROTATION 3
+#elif defined(ROTATION) && ROTATION == 3
+#define TAMC_GT911_ROTATION 0
+#endif
+
 // Beeper thing
 #define BEEPER P5
 
@@ -101,3 +112,9 @@
 
 // Power-management interrupt
 #define PM_INT P7
+
+// CAN bus
+#define CAN_TX 6
+#define CAN_RX 0
+#define CAN_POLLING_RATE_MS 1000
+#define CAN_TRANSMIT_RATE_MS 1000

@@ -15,7 +15,7 @@ extern "C" void tca_expander_reset_dance(void);
 
 void tca_expander_reset_dance(void)
 {
-  Wire.begin(I2C_SDA, I2C_SCL, 100000); // Slow down I2C, because we will use long wires.
+  Wire.begin(I2C_SDA, I2C_SCL, I2C_SPEED); // Slow down I2C, because we will use long wires.
   expander.begin();
   // To test this, make a small beep.
   expander.pinMode1(BEEPER, OUTPUT);
