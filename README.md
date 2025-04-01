@@ -195,7 +195,168 @@ for (uint16_t x_coord = 0; x_coord < TFT_WIDTH; x_coord++)
 
 ### LVGL
 
-LVGL 8.4 is used here, becuase I found a possible bug [in another project that use the same display](https://github.com/ha5dzs/Guition-ESP32-4848S040-platformio).
+LVGL 8.4 is used here, becuase I found a possible bug [in another project that use the same display](https://github.com/ha5dzs/Guition-ESP32-4848S040-platformio). Following on from the tutorials:
+
+```C
+#include <lvgl.h>
+
+static lv_disp_draw_buf_t draw_buffer;
+static lv_color_t *frame_buffer;
+static lv_disp_drv_t display_driver;
+```
+
+LVGL needs a number of components to be in place, these are:
+
+#### Some way to annotate the passage of time
+
+Here, a `ticker` object was set up to execute a callback function:
+
+```C
+
+#include <Ticker.h>
+// tigger every 5 milliseconds
+#define TICKER_MS 5
+
+Ticker ticker;
+
+// This function is executed every LVGL_TICKER_MS milliseconds.
+void ticker_call_function(void)
+{
+  lv_tick_inc(TICKER_MS);
+  lv_task_handler();
+}
 
 
+void setup()
+{
+    // Ticker
+  ticker.attach_ms(TICKER_MS, ticker_call_function);
+}
+```
 
+#### Tell the display that the frame buffer has been finished with and can `flush()`
+
+As the display was initialised so it needs manual flushing, it is done here.
+
+```C
+// Display updater function
+void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p)
+{
+    uint32_t w = (area->x2 - area->x1 + 1);
+    uint32_t h = (area->y2 - area->y1 + 1);
+
+    tft->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t *)&color_p->full, w, h);
+    tft->flush(); // Do the actual flushing
+
+    lv_disp_flush_ready(disp);
+}
+```
+
+#### Assign the draw buffer, the frame buffer, and the fush function to the display driver
+
+The trick here was to put the frame buffer (480x480x2 bytes) into the SPI Ram. This comes with a small performace overhead, but it's a dumb directly-driven display so won't really be suitable for high-framerate stuff. Even the widgets demo ran something like 10 frames per second, which is not a lot.
+
+```C
+setup()
+{
+    lv_init(); // Start the dance
+
+  // Initialise an entire frame's buffer in the SPI RAM
+  frame_buffer = (lv_color_t *)heap_caps_malloc(sizeof(lv_color_t) * TFT_WIDTH * TFT_HEIGHT, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+  // If the PSRAM is not initialised, this should fail. 480x480x2=460800 -> 450 kB
+  if(frame_buffer == NULL)
+  {
+    Serial.println("Unable to allocate memory for the frame buffer. Do you have enough PSRAM?\n");
+    while(1);
+  }
+
+  // Initialise draw buffer, and assign it to the frame buffer.
+  lv_disp_draw_buf_init(&draw_buffer, frame_buffer, NULL, TFT_WIDTH * TFT_HEIGHT);
+
+  // Initialise the display driver, and set some basic details.
+  lv_disp_drv_init(&display_driver);
+  display_driver.hor_res = TFT_WIDTH;
+  display_driver.ver_res = TFT_HEIGHT;
+  display_driver.flush_cb = my_disp_flush; // Assign callback for display update
+  display_driver.full_refresh = 0; // Always redraw the entire screen. This makes it slower
+  display_driver.draw_buf = &draw_buffer; // The memory address where the draw buffer begins
+
+  // Finally, register this display
+  lv_disp_drv_register(&display_driver);
+
+}
+```
+
+#### Input management
+
+Despite the `TP_INT` being wired up, an interrupt is not set up to read the touch panel. This is because LVGL does this anyway, with regular polling. So in this case, the `TAMC_GT911` library is used just to check whether a touch is detected, and in case there are more than one touch points, it updates the first one detected as the 'actual' touch to LVGL.
+
+```C
+// Touch panel callback function. LVGL 8.4.0 does not support multitouch.
+void my_input_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data)
+{
+  touch_panel.read();
+  {
+    if (touch_panel.isTouched)
+    {
+      data->state = LV_INDEV_STATE_PRESSED;
+      // Since no multitouch, get the first point.
+      data->point.x = touch_panel.points[0].x;
+      data->point.y = touch_panel.points[0].y;
+    }
+    else
+    {
+      data->state = LV_INDEV_STATE_RELEASED;
+    }
+  }
+}
+```
+
+Then, in the main code, the input driver is configured like so:
+
+```C
+  // Initialise the touch panel driver
+  static lv_indev_drv_t indev_drv;
+  lv_indev_drv_init(&indev_drv);
+  indev_drv.type = LV_INDEV_TYPE_POINTER; // No multitouch :()
+  indev_drv.read_cb = my_input_read; // This is where we read the touch controller
+  lv_indev_drv_register(&indev_drv);
+```
+
+...and that's it for LVGL, there is an example loaded in and it works.
+
+### Clocks
+
+While the ESP has a real-time clock, it resets when it loses power because there is no backup battery. The board also has an external real-time clock with a backup battery connector, this is the `PCF85036A` chip. For logging and telling the time, I plan to use unix time because it is strictly and monotonically increasing, so I prefer some POSIX-compliant structure. Unfortunately, it seems that the PCF85036A chip does not support time zones, so at this point I had no choice but not to define one for now with the ESP RTC.
+
+If/when networking will be implemented, the ESP RTC will be set using NTP, and then the code will update the PCF85036A chip as well. So when next time the device starts, the clock stay accurate and I can get a reasonably accurate Unix timestamp.
+
+### Debug and diagnostic information
+
+These are sent out via the UART. If the RS-485 is used for something, these should be commented out. Otherwise
+
+This statement prints out the available SPI RAM. This can be used to check if the memory configuration was OK.
+```C
+serial.printf("Available PSRAM: %d KB\n", heap_caps_get_free_size(MALLOC_CAP_SPIRAM)>>10);
+```
+
+These statements are for checking the clocks
+
+```C
+ Serial.printf("PCF85063A RTC says it's %d/%d/%d %d:%d:%d\n", external_rtc.getYear(), external_rtc.getMonth(), external_rtc.getDay(), external_rtc.getHour(), external_rtc.getMinute(), external_rtc.getSecond());
+  Serial.print("Internal RTC says: ");
+  Serial.println(internal_rtc.getTime("%A, %B %d %Y %H:%M:%S"));
+  Serial.print("Current Unix time is: ");
+  Serial.println(internal_rtc.getEpoch());
+```
+
+# Evidence
+
+Test pattern
+
+![](docs/test_pattern.jpg)
+
+LVGL working
+
+![](docs/cat_on_waveshare.jpg)

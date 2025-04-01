@@ -81,11 +81,9 @@ void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color
     lv_disp_flush_ready(disp);
 }
 
-//This function is executed every LVGL_TICKER_MS milliseconds.
+// This function is executed every LVGL_TICKER_MS milliseconds.
 void ticker_call_function(void)
 {
-  // Since the serial port here doesn't work, I blink the backlight.
-  //digitalWrite(TFT_BL, !digitalRead(TFT_BL)); // Oldest trick in the book.
   lv_tick_inc(TICKER_MS);
   lv_task_handler();
 }
