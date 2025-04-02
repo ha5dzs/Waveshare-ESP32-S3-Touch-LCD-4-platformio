@@ -118,3 +118,8 @@
 #define CAN_RX 0
 #define CAN_POLLING_RATE_MS 1000
 #define CAN_TRANSMIT_RATE_MS 1000
+
+// RS485, which is wired to UART0 but with a weird circuit
+#define RS485_BITRATE 115200 /* in bits per second. */
+#define RS485_DIRECTION 44 /* Physical pin 36: High: Input, Low: Output */
+#define RS485_RECEIVE_PIN 43 /* Physical pin 37 */

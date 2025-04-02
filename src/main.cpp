@@ -11,7 +11,8 @@
 #include <lvgl.h>
 #include <Ticker.h>
 #include "keyboard_example_scene.h"
-
+//#include <SoftwareSerial.h>
+#include <HardwareSerial.h>
 #define TICKER_MS 5
 
 // IO expander.
@@ -24,6 +25,10 @@ TCA9554 expander(EXPANDER_ADDRESS, SoftWire);
 // V2 board, everything is on the I2C bus
 TCA9554 expander(EXPANDER_ADDRESS);
 #endif
+
+// Software serial for the RS-485 interface.
+//EspSoftwareSerial::UART RS485;
+HardwareSerial RS485(1); // Use UART1.
 
 // Software SPI to configure the display.
 Arduino_DataBus *sw_spi_bus = new Arduino_SWSPI(GFX_NOT_DEFINED /* DC pin */, TFT_CS /* TFT Chip Select */, TFT_SCK /* SPI clock */, TFT_SDA /* MOSI */, GFX_NOT_DEFINED /* MISO */);
@@ -110,7 +115,17 @@ void my_input_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data)
 
 void setup()
 {
-  Serial.begin(115200); // Initialise the UART.
+  Serial.begin(115200); // Initialise the USB CDC UART.
+
+  // The RS485 stuff needs a bit of hacking
+  //pinMode(RS485_DIRECTION, OUTPUT);
+  //digitalWrite(RS485_DIRECTION, HIGH); // Set the transceiver to receive
+  //pinMode(RS485_RECEIVE_PIN, INPUT);
+  //RS485.begin(RS485_BITRATE, EspSoftwareSerial::SWSERIAL_8N1, RS485_RECEIVE_PIN); // Softwareserial
+
+  pinMode(RS485_DIRECTION, OUTPUT);
+  digitalWrite(RS485_DIRECTION, HIGH); // Set the transceiver to receive
+  RS485.begin(RS485_BITRATE, SERIAL_8N1, RS485_RECEIVE_PIN, -1 /* No TX pin*/);
 
   // Start up the I2C hardware and reset peripherals using the IO expander.
   tca_expander_reset_dance();
@@ -206,20 +221,32 @@ void setup()
   Serial.println(internal_rtc.getTime("%A, %B %d %Y %H:%M:%S"));
   Serial.print("Current Unix time is: ");
   Serial.println(internal_rtc.getEpoch());
+
 }
 
 void loop()
 {
   /*
+  // Send touch information via the UART
   touch_panel.read();
   if (touch_panel.isTouched){
     for (int i=0; i<touch_panel.touches; i++){
-      Serial.print("Touch ");Serial.print(i+1);Serial.print(": ");;
-      Serial.print("  x: ");Serial.print(touch_panel.points[i].x);
-      Serial.print("  y: ");Serial.print(touch_panel.points[i].y);
-      Serial.print("  size: ");Serial.println(touch_panel.points[i].size);
-      Serial.println(' ');
+      Serial0.print("Touch ");Serial0.print(i+1);Serial0.print(": ");;
+      Serial0.print("  x: ");Serial0.print(touch_panel.points[i].x);
+      Serial0.print("  y: ");Serial0.print(touch_panel.points[i].y);
+      Serial0.print("  size: ");Serial0.println(touch_panel.points[i].size);
+      Serial0.println(' ');
     }
   }
   */
+
+  // Read from the RS485 port, and spit back data over the CDC serial port.
+  while(RS485.available() > 0)
+  {
+    Serial.write(RS485.read());
+    yield(); // Whoa.
+  }
+
+
+
 }

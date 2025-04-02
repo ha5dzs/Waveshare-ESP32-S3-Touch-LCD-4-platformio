@@ -98,6 +98,28 @@ There is no dedicated Arduino library for this, but [someone asked this on Stack
 
 The board has a CAN bus transceiver, and the `CANH` and `CANL` lines are wired to the interface connector. Through the IO multiplexer in the ESP32, it is possible to receive and transmit CAN frames using its internal dedicated hardware. For some reason, they don't call it CAN (Control Area Network), but they call it [TWAI (Two-Wire Automotive Interface)](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/peripherals/twai.html). Due to a large number of variants, its code is moved to a separate file.
 
+## RS-485 UART
+
+The RS-485 implementation is a little weird. As it only has one line present, it can only ever be half-duplex. The Receiver Enable (RE) and Driver Enable (DE) pins are connected together, and are switched through the S1 transistor.
+
+![](docs/rs485_misery.PNG)
+
+The RS485 transceiver's input (DI) is connected to the ground. The transceiver's output (RO) is connected to the ESP32's TX0 pin. The mode controller pins are tied together and through a J3Y transistor, wired to the ESP32's RX0 pin.
+
+The mode is controlled via the :
+
+* When ESP IO 44 is logic high, RE and DE are being pulled down to zero, and we are in receive mode.
+  * The data from the RS-485 bus is out on Pin 1, which is connected to UART TXD (ESP IO 43, Pin 37)
+  * So to receive data, one cannot use the hardware UART.
+
+* When ESP IO 44 is logic low, RE and DE are logic high, and we are in transmit mode. But
+  * DI is directly connected to the ground, so it only can set the bus to low
+  * So in order to transmit, UART RXD (ESP IO 44, Pin 36) must be keyed with the data.
+
+Now at this point, I am not sure that the factory RS-485 example would work at all. They really could have had a GPIO pin say from the IO expander dedicated for direction control. And why did they hook two outputs to work against each other?
+
+This means that the UART in the ESP32 cannot be directly used with the RS485 transceiver, at least not without swapping the two input pins.
+
 ## Software
 
 ## Environment setup
@@ -331,6 +353,64 @@ Then, in the main code, the input driver is configured like so:
 While the ESP has a real-time clock, it resets when it loses power because there is no backup battery. The board also has an external real-time clock with a backup battery connector, this is the `PCF85036A` chip. For logging and telling the time, I plan to use unix time because it is strictly and monotonically increasing, so I prefer some POSIX-compliant structure. Unfortunately, it seems that the PCF85036A chip does not support time zones, so at this point I had no choice but not to define one for now with the ESP RTC.
 
 If/when networking will be implemented, the ESP RTC will be set using NTP, and then the code will update the PCF85036A chip as well. So when next time the device starts, the clock stay accurate and I can get a reasonably accurate Unix timestamp.
+
+### The RS-485 interface
+
+Well, this was a bit complicated. It seems that Waveshare accidentally wired two outputs together, so I had to use softwareserial to make the TX pin an input for receiving data, and the RX pin an output for setting trasnmission direction for the transmitter. There are two ways around this:
+
+* SoftwareSerial, where the the data direction is set manually and we only ever receive, such as:
+```C
+#include <SoftwareSerial.h>
+
+// Software serial for the RS-485 interface.
+EspSoftwareSerial::UART RS485;
+
+setup()
+{
+  // The RS485 stuff needs a bit of hacking
+  pinMode(RS485_DIRECTION, OUTPUT);
+  digitalWrite(RS485_DIRECTION, HIGH); // Set the transceiver to receive
+  pinMode(RS485_RECEIVE_PIN, INPUT);
+  RS485.begin(RS485_BITRATE, EspSoftwareSerial::SWSERIAL_8N1, RS485_RECEIVE_PIN); // Softwareserial
+}
+
+loop()
+{
+   // Softwareserial: Read from the RS485 port, and spit back data over the CDC serial port.
+  while(RS485.available() > 0)
+  {
+    Serial.write(RS485.read());
+    yield(); // Whoa.
+  }
+}
+```
+This method works for slow data speeds. But, since the hardware is rather busy, timing anomalies may be present at more decent data rates.
+
+* It is also possible, according to the documentation, to make a custom pin definition of the UART. This is because it seems that all the pins of the ESP32 are multiplexed. The code then becomes:
+
+```C
+#include <HardwareSerial.h>
+
+HardwareSerial RS485(1); // Use UART1.
+
+start()
+{
+  pinMode(RS485_DIRECTION, OUTPUT);
+  digitalWrite(RS485_DIRECTION, HIGH); // Set the transceiver to receive
+  RS485.begin(RS485_BITRATE, SERIAL_8N1, RS485_RECEIVE_PIN, -1 /* No TX pin*/);
+}
+
+loop()
+{
+    while(RS485.available() > 0)
+  {
+    Serial.write(RS485.read());
+    yield(); // Whoa.
+  }
+}
+```
+
+Hardware serial works better at high bitrates.
 
 ### Debug and diagnostic information
 
