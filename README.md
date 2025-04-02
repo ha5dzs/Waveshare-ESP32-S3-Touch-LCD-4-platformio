@@ -402,7 +402,7 @@ start()
 
 loop()
 {
-    while(RS485.available() > 0)
+  while(RS485.available() > 0)
   {
     Serial.write(RS485.read());
     yield(); // Whoa.
